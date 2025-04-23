@@ -28,7 +28,7 @@ if [ "$EUID" -ne 0 ]; then
   exit 1
 fi
 
-# Input dei parametri
+# Input dei parametri di base
 read -p "Inserisci il nome dell'interfaccia di rete primaria [eth1]: " PRIMARY_INTERFACE
 PRIMARY_INTERFACE=${PRIMARY_INTERFACE:-eth1}
 
@@ -38,10 +38,16 @@ SECONDARY_INTERFACE=${SECONDARY_INTERFACE:-wwan0}
 read -p "Inserisci l'indirizzo IP da monitorare con ping [8.8.8.8]: " PING_IP
 PING_IP=${PING_IP:-8.8.8.8}
 
-# Rileva automaticamente i gateway delle interfacce
-print_info "Rilevamento dei gateway..."
+read -p "Inserisci l'APN per la connessione 1nce [iot.1nce.net]: " APN
+APN=${APN:-iot.1nce.net}
 
-# Rileva il gateway dell'interfaccia primaria
+# Directory di lavoro
+SCRIPT_DIR="/usr/local/bin"
+mkdir -p $SCRIPT_DIR
+
+# FASE 1: Rilevamento del gateway dell'interfaccia primaria
+print_info "Rilevamento del gateway dell'interfaccia primaria..."
+
 PRIMARY_GATEWAY=$(ip route | grep "default via" | grep "$PRIMARY_INTERFACE" | awk '{print $3}')
 if [ -z "$PRIMARY_GATEWAY" ]; then
     # Se non è presente un gateway default, cerca altre rotte attraverso l'interfaccia
@@ -56,11 +62,62 @@ print_info "Gateway rilevato per $PRIMARY_INTERFACE: $PRIMARY_GATEWAY"
 read -p "Vuoi modificare il gateway dell'interfaccia primaria? [$PRIMARY_GATEWAY]: " NEW_PRIMARY_GATEWAY
 PRIMARY_GATEWAY=${NEW_PRIMARY_GATEWAY:-$PRIMARY_GATEWAY}
 
-# Rileva il gateway dell'interfaccia secondaria
+# FASE 2: Installazione di keepalived
+print_info "Installazione di keepalived..."
+apt-get update
+apt-get install -y keepalived
+
+# FASE 3: Configurazione della connessione 1nce
+print_info "Configurazione della connessione 1nce..."
+
+# Verificare se NetworkManager è installato
+if ! command -v nmcli &> /dev/null; then
+    print_warning "NetworkManager non trovato. Installazione in corso..."
+    apt-get install -y network-manager
+fi
+
+# Verificare se la connessione esiste già
+if nmcli connection show | grep -q "1nce"; then
+    print_warning "Connessione 1nce già esistente. Rimozione della connessione precedente..."
+    nmcli connection delete 1nce
+fi
+
+# Creare la connessione gsm
+print_info "Creazione della connessione mobile 1nce..."
+nmcli connection add \
+    type gsm \
+    con-name 1nce \
+    ifname cdc-wdm0 \
+    apn $APN \
+    autoconnect yes
+
+# Attivare la connessione
+print_info "Attivazione della connessione 1nce..."
+nmcli connection up 1nce
+
+# Attendere alcuni secondi per permettere alla connessione di stabilirsi
+print_info "Attendo che la connessione si stabilizzi..."
+sleep 10
+
+# FASE 4: Recuperare l'indirizzo IP e il gateway dell'interfaccia secondaria
+print_info "Recupero delle informazioni dell'interfaccia $SECONDARY_INTERFACE..."
+
+# Recuperare l'indirizzo IP dell'interfaccia secondaria
+SECONDARY_IP=$(ip addr show $SECONDARY_INTERFACE | grep -oP 'inet \K[\d.]+')
+if [ -z "$SECONDARY_IP" ]; then
+    print_warning "Non è stato possibile recuperare l'indirizzo IP di $SECONDARY_INTERFACE. Verrà impostato manualmente."
+    SECONDARY_IP="192.168.1.2"  # Default in caso di mancato rilevamento
+fi
+
+print_info "Indirizzo IP rilevato per $SECONDARY_INTERFACE: $SECONDARY_IP"
+read -p "Vuoi modificare l'indirizzo IP dell'interfaccia secondaria? [$SECONDARY_IP]: " NEW_SECONDARY_IP
+SECONDARY_IP=${NEW_SECONDARY_IP:-$SECONDARY_IP}
+
+# Recuperare il gateway dell'interfaccia secondaria
 SECONDARY_GATEWAY=$(ip route | grep "default via" | grep "$SECONDARY_INTERFACE" | awk '{print $3}')
 if [ -z "$SECONDARY_GATEWAY" ]; then
     # Se non è presente un gateway default, cerca altre rotte attraverso l'interfaccia
-    SECONDARY_GATEWAY=$(ip route | grep "$SECONDARY_INTERFACE" | head -n 1 | awk '{print $1}')
+    SECONDARY_GATEWAY=$(ip route | grep "$SECONDARY_INTERFACE" | grep -v "default" | head -n 1 | awk '{print $1}')
     if [ -z "$SECONDARY_GATEWAY" ]; then
         print_warning "Non è stato possibile rilevare automaticamente il gateway per $SECONDARY_INTERFACE"
         SECONDARY_GATEWAY="10.217.145.117"  # Default in caso di mancato rilevamento
@@ -71,18 +128,23 @@ print_info "Gateway rilevato per $SECONDARY_INTERFACE: $SECONDARY_GATEWAY"
 read -p "Vuoi modificare il gateway dell'interfaccia secondaria? [$SECONDARY_GATEWAY]: " NEW_SECONDARY_GATEWAY
 SECONDARY_GATEWAY=${NEW_SECONDARY_GATEWAY:-$SECONDARY_GATEWAY}
 
-read -p "Inserisci l'APN per la connessione 1nce [iot.1nce.net]: " APN
-APN=${APN:-iot.1nce.net}
+# Richiedi l'indirizzo IP della VPN o altro endpoint da raggiungere attraverso la connessione secondaria
+read -p "Inserisci l'indirizzo IP o la rete di destinazione per la rotta statica [10.65.235.233/32]: " VPN_DEST
+VPN_DEST=${VPN_DEST:-"10.65.235.233/32"}
 
-# Directory di lavoro
-SCRIPT_DIR="/usr/local/bin"
-mkdir -p $SCRIPT_DIR
+# Aggiungere la rotta statica alla connessione
+print_info "Aggiunta della rotta statica $VPN_DEST via $SECONDARY_IP alla connessione 1nce..."
+nmcli connection modify 1nce +ipv4.routes "$VPN_DEST $SECONDARY_IP"
 
-print_info "Installazione di keepalived..."
-apt-get update
-apt-get install -y keepalived
+# Riapplicare la connessione per attivare le nuove impostazioni
+print_info "Riattivazione della connessione 1nce con le nuove impostazioni..."
+nmcli connection down 1nce
+sleep 2
+nmcli connection up 1nce
+sleep 5
 
-# Creazione script di ping per verificare la connettività di eth1
+# FASE 5: Creazione degli script per keepalived
+# Script di ping per verificare la connettività di eth1
 print_info "Creazione dello script di ping check-eth1.sh..."
 cat > $SCRIPT_DIR/check-eth1.sh << EOF
 #!/bin/bash
@@ -101,7 +163,7 @@ EOF
 
 chmod +x $SCRIPT_DIR/check-eth1.sh
 
-# Creazione script di failover handler
+# Script di failover handler
 print_info "Creazione dello script di failover keepalived-failover-handler.sh..."
 cat > $SCRIPT_DIR/keepalived-failover-handler.sh << EOF
 #!/bin/bash
@@ -150,7 +212,7 @@ EOF
 
 chmod +x $SCRIPT_DIR/keepalived-failover-handler.sh
 
-# Creazione della configurazione di keepalived
+# FASE 6: Configurazione di keepalived
 print_info "Creazione della configurazione di keepalived..."
 cat > /etc/keepalived/keepalived.conf << EOF
 global_defs {
@@ -186,65 +248,12 @@ vrrp_instance VI_1 {
 }
 EOF
 
-# Configurazione e avvio del servizio keepalived
+# FASE 7: Avvio del servizio keepalived
 print_info "Configurazione e avvio del servizio keepalived..."
 systemctl enable keepalived
 systemctl restart keepalived
 
-# Creazione della connessione 1nce con nmcli
-print_info "Creazione della connessione 1nce usando nmcli..."
-
-# Verificare se NetworkManager è installato
-if ! command -v nmcli &> /dev/null; then
-    print_warning "NetworkManager non trovato. Installazione in corso..."
-    apt-get install -y network-manager
-fi
-
-# Verificare se la connessione esiste già
-if nmcli connection show | grep -q "1nce"; then
-    print_warning "Connessione 1nce già esistente. Rimozione della connessione precedente..."
-    nmcli connection delete 1nce
-fi
-
-# Creare la connessione gsm
-print_info "Creazione della connessione mobile 1nce..."
-nmcli connection add \
-    type gsm \
-    con-name 1nce \
-    ifname cdc-wdm0 \
-    apn $APN \
-    autoconnect yes
-
-# Attivare la connessione
-print_info "Attivazione della connessione 1nce..."
-nmcli connection up 1nce
-
-# Attendere alcuni secondi per permettere alla connessione di stabilirsi
-print_info "Attendo che la connessione si stabilizzi..."
-sleep 10
-
-# Recuperare l'indirizzo IP dell'interfaccia secondaria
-print_info "Recupero dell'indirizzo IP dell'interfaccia $SECONDARY_INTERFACE..."
-SECONDARY_IP=$(ip addr show $SECONDARY_INTERFACE | grep -oP 'inet \K[\d.]+')
-
-if [ -z "$SECONDARY_IP" ]; then
-    print_warning "Non è stato possibile recuperare l'indirizzo IP di $SECONDARY_INTERFACE. Utilizzo del gateway come IP."
-    SECONDARY_IP=$SECONDARY_GATEWAY
-fi
-
-print_info "Indirizzo IP rilevato per $SECONDARY_INTERFACE: $SECONDARY_IP"
-read -p "Vuoi modificare l'indirizzo IP dell'interfaccia secondaria? [$SECONDARY_IP]: " NEW_SECONDARY_IP
-SECONDARY_IP=${NEW_SECONDARY_IP:-$SECONDARY_IP}
-
-# Richiedi l'indirizzo IP della VPN o altro endpoint da raggiungere attraverso la connessione secondaria
-read -p "Inserisci l'indirizzo IP o la rete di destinazione per la rotta statica [10.65.235.233/32]: " VPN_DEST
-VPN_DEST=${VPN_DEST:-"10.65.235.233/32"}
-
-# Aggiungere la rotta statica alla connessione
-print_info "Aggiunta della rotta statica via $SECONDARY_IP alla connessione 1nce per la VPN..."
-nmcli connection modify 1nce +ipv4.routes "$VPN_DEST $SECONDARY_IP"
-
-# Verifica finale
+# FASE 8: Verifica finale
 print_info "Verifica dello stato dei servizi..."
 
 if systemctl is-active --quiet keepalived; then
@@ -266,8 +275,10 @@ echo "- Interfaccia primaria: $PRIMARY_INTERFACE"
 echo "- Interfaccia secondaria: $SECONDARY_INTERFACE"
 echo "- IP monitorato con ping: $PING_IP"
 echo "- Gateway primario: $PRIMARY_GATEWAY"
-echo "- Gateway secondario: $SECONDARY_GATEWAY"
+echo "- Gateway secondario: $SECONDARY_GATEWAY" 
+echo "- IP secondario: $SECONDARY_IP"
 echo "- APN per connessione 1nce: $APN"
+echo "- Rotta statica: $VPN_DEST via $SECONDARY_IP"
 echo ""
 echo "Script creati in $SCRIPT_DIR:"
 echo "- check-eth1.sh"
