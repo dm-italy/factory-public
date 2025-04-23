@@ -71,8 +71,8 @@ print_info "Gateway rilevato per $SECONDARY_INTERFACE: $SECONDARY_GATEWAY"
 read -p "Vuoi modificare il gateway dell'interfaccia secondaria? [$SECONDARY_GATEWAY]: " NEW_SECONDARY_GATEWAY
 SECONDARY_GATEWAY=${NEW_SECONDARY_GATEWAY:-$SECONDARY_GATEWAY}
 
-read -p "Inserisci l'APN per la connessione 1nce [1nce.net]: " APN
-APN=${APN:-1nce.net}
+read -p "Inserisci l'APN per la connessione 1nce [iot.1nce.net]: " APN
+APN=${APN:-iot.1nce.net}
 
 # Directory di lavoro
 SCRIPT_DIR="/usr/local/bin"
@@ -216,8 +216,8 @@ nmcli connection add \
     autoconnect yes
 
 # Aggiungere la rotta statica alla connessione - metrica alta per usarla solo come backup
-print_info "Aggiunta della rotta statica via $SECONDARY_GATEWAY alla connessione 1nce..."
-nmcli connection modify 1nce ipv4.routes "default via $SECONDARY_GATEWAY metric 300"
+print_info "Aggiunta della rotta statica via $SECONDARY_GATEWAY alla connessione 1nce per la VPN..."
+nmcli connection modify 1nce +ipv4.routes "10.65.235.233/32 $SECONDARY_GATEWAY"
 
 # Attivare la connessione
 print_info "Attivazione della connessione 1nce..."
