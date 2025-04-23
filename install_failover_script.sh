@@ -211,17 +211,38 @@ print_info "Creazione della connessione mobile 1nce..."
 nmcli connection add \
     type gsm \
     con-name 1nce \
-    ifname $SECONDARY_INTERFACE \
+    ifname cdc-wdm0 \
     apn $APN \
     autoconnect yes
-
-# Aggiungere la rotta statica alla connessione - metrica alta per usarla solo come backup
-print_info "Aggiunta della rotta statica via $SECONDARY_GATEWAY alla connessione 1nce per la VPN..."
-nmcli connection modify 1nce +ipv4.routes "10.65.235.233/32 $SECONDARY_GATEWAY"
 
 # Attivare la connessione
 print_info "Attivazione della connessione 1nce..."
 nmcli connection up 1nce
+
+# Attendere alcuni secondi per permettere alla connessione di stabilirsi
+print_info "Attendo che la connessione si stabilizzi..."
+sleep 10
+
+# Recuperare l'indirizzo IP dell'interfaccia secondaria
+print_info "Recupero dell'indirizzo IP dell'interfaccia $SECONDARY_INTERFACE..."
+SECONDARY_IP=$(ip addr show $SECONDARY_INTERFACE | grep -oP 'inet \K[\d.]+')
+
+if [ -z "$SECONDARY_IP" ]; then
+    print_warning "Non è stato possibile recuperare l'indirizzo IP di $SECONDARY_INTERFACE. Utilizzo del gateway come IP."
+    SECONDARY_IP=$SECONDARY_GATEWAY
+fi
+
+print_info "Indirizzo IP rilevato per $SECONDARY_INTERFACE: $SECONDARY_IP"
+read -p "Vuoi modificare l'indirizzo IP dell'interfaccia secondaria? [$SECONDARY_IP]: " NEW_SECONDARY_IP
+SECONDARY_IP=${NEW_SECONDARY_IP:-$SECONDARY_IP}
+
+# Richiedi l'indirizzo IP della VPN o altro endpoint da raggiungere attraverso la connessione secondaria
+read -p "Inserisci l'indirizzo IP o la rete di destinazione per la rotta statica [10.65.235.233/32]: " VPN_DEST
+VPN_DEST=${VPN_DEST:-"10.65.235.233/32"}
+
+# Aggiungere la rotta statica alla connessione
+print_info "Aggiunta della rotta statica via $SECONDARY_IP alla connessione 1nce per la VPN..."
+nmcli connection modify 1nce +ipv4.routes "$VPN_DEST $SECONDARY_IP"
 
 # Verifica finale
 print_info "Verifica dello stato dei servizi..."
