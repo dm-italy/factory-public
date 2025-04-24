@@ -235,9 +235,9 @@ vrrp_instance VI_1 {
     priority 100
     advert_int 1
 
-    nopreempt               # Impedisce di tornare automaticamente a MASTER
-    preempt_delay 10        # Aspetta 10 secondi prima di tornare a MASTER
-    garp_master_delay 1     # Invia subito i gratuitous ARP in stato MASTER
+    # nopreempt               # Impedisce di tornare automaticamente a MASTER
+    # preempt_delay 10        # Aspetta 10 secondi prima di tornare a MASTER
+    # garp_master_delay 1     # Invia subito i gratuitous ARP in stato MASTER
  
     track_script {
         chk_eth1
